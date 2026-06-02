@@ -1,6 +1,3 @@
-Here is the complete, scrubbed **`openagent-frontend/README.md`** ready for you to copy. I have placed it inside a Markdown code block so you can easily copy and paste it directly into your repository.
-
-```markdown
 # openagent-frontend
 
 > **The OpenAgent user interface** — the lean Streamlit chat UI that sits in front of `openagent-api`.
