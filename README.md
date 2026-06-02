@@ -1,4 +1,4 @@
-# openagent-frontend
+# OpenAgent-frontend
 
 > **The OpenAgent user interface** — the lean Streamlit chat UI that sits in front of `openagent-api`.
 
