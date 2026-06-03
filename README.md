@@ -1,4 +1,4 @@
-# OpenAgent-frontend
+# openagent-frontend
 
 > **The OpenAgent user interface** — the lean Streamlit chat UI that sits in front of `openagent-api`.
 
@@ -8,7 +8,7 @@
 
 `openagent-frontend` is the **user interface layer** of the OpenAgent system. It is a lean Streamlit web app that renders the chat experience, tracks in-session conversation state, and consumes a streaming response from [`openagent-api`](../openagent-api). That is the entire job.
 
-This repo is scoped to the UI only. It has no model, no persona, no inference code, no database, no auth backend. It does not own the agent identity—the persona is owned upstream by `openagent-api`. What lives here:
+This repo is scoped to the UI only. It has no model, no persona, no inference code, no database, no auth backend. It does not own the agent identity — the persona is owned upstream by `openagent-api`. What lives here:
 
 - The **Streamlit chat UI** that users talk to
 - The **HTTP/SSE client** that streams responses from `openagent-api`
@@ -17,7 +17,7 @@ This repo is scoped to the UI only. It has no model, no persona, no inference co
 - The **health gate** that locks the UI until the upstream model is ready
 - The **error display** with the emoji prefixes (🔌 ⏳ 🔐 ⚠️ ❌)
 
-The boundary with `openagent-api` is deliberately sharp: the frontend owns *how the agent looks and feels to the user*, the gateway owns *who the agent is, how requests are authenticated, and how the upstream stream is relayed*. The two communicate over a stable HTTP/SSE contract.
+I kept the boundary with `openagent-api` deliberately sharp: the frontend owns *how the agent looks and feels to the user*, the gateway owns *who the agent is, how requests are authenticated, and how the upstream stream is relayed*. The two communicate over a stable HTTP/SSE contract.
 
 ---
 
@@ -40,7 +40,6 @@ openagent-os
 │
 └── openagent-logger     ← separate repo
     └── Structured event log (called by openagent-api)
-
 ```
 
 The naming convention is intentional:
@@ -52,7 +51,6 @@ The naming convention is intentional:
 
 ```text
 User → openagent-frontend (:8000) → openagent-api (:8001) → openagent-infra (:8002) → BYOC Provider
-
 ```
 
 Users only ever interact with port 8000. Port 8001 is `openagent-api`, port 8002 is `openagent-infra`, and the compute provider is reached over HTTPS — none of those layers are exposed to end users. `openagent-frontend` is the only client of `openagent-api`, and `openagent-api` is the only thing `openagent-frontend` talks to.
@@ -132,7 +130,6 @@ Users only ever interact with port 8000. Port 8001 is `openagent-api`, port 8002
 │      base reasoning model                               │
 │      nervous-system control layer                       │
 └─────────────────────────────────────────────────────────┘
-
 ```
 
 ### Request flow
@@ -140,35 +137,30 @@ Users only ever interact with port 8000. Port 8001 is `openagent-api`, port 8002
 1. User types a message in the Streamlit chat input.
 2. The frontend appends it to `st.session_state.messages`.
 3. The frontend constructs a user/assistant-only messages list:
+
 ```json
 [
   { "role": "user",      "content": "<first turn>" },
   { "role": "assistant", "content": "<first answer>" },
   { "role": "user",      "content": "<current input>" }
 ]
-
 ```
 
-
-**No system message.** `openagent-api` prepends the persona server-side. If the frontend accidentally sends one, `openagent-api` drops it with a warning log.
+   **No system message.** `openagent-api` prepends the persona server-side. If the frontend accidentally sends one, `openagent-api` drops it with a warning log.
 4. The list (plus optional `reasoning_effort`) is POSTed to `openagent-api`'s `/chat` endpoint with the `X-API-Key: OPENAGENT_API_KEY` header.
 5. `openagent-api` prepends the persona, validates auth, and forwards to `openagent-infra`. `openagent-infra` injects the reasoning level and forwards to the BYOC provider.
 6. The chunks flow back through `openagent-infra` and `openagent-api` byte-for-byte (SSE relay) and arrive at the frontend.
 7. `sse_decoder.py` consumes the raw line iterator from `requests.iter_lines()` and yields typed `SSEEvent` objects:
-* `kind="reasoning"` for chain-of-thought tokens (from `delta.reasoning`)
-* `kind="content"` for visible answer tokens (from `delta.content`)
-* `kind="finish"` for the `finish_reason` chunk
-* `kind="error"` for in-band `[ERROR ...]` sentinels
-* `kind="done"` for the `[DONE]` sentinel
-
-
+   * `kind="reasoning"` for chain-of-thought tokens (from `delta.reasoning`)
+   * `kind="content"` for visible answer tokens (from `delta.content`)
+   * `kind="finish"` for the `finish_reason` chunk
+   * `kind="error"` for in-band `[ERROR ...]` sentinels
+   * `kind="done"` for the `[DONE]` sentinel
 8. `app.py`'s render loop routes each event to the right UI surface:
-* reasoning → live-streamed into a collapsible "Show thinking" expander
-* content → live-streamed into the main chat bubble
-* error → red banner via `st.error()`, loop breaks
-* done → loop breaks cleanly
-
-
+   * reasoning → live-streamed into a collapsible "Show thinking" expander
+   * content → live-streamed into the main chat bubble
+   * error → red banner via `st.error()`, loop breaks
+   * done → loop breaks cleanly
 9. When the stream completes, the assistant turn is appended to session state (without the reasoning — only `{role, content}` is persisted).
 
 ### Separation of concerns
@@ -244,7 +236,6 @@ openagent-frontend/
 ├── .dockerignore                   # keeps .env and caches out of image
 ├── .gitignore                      # keeps .env and caches out of git
 └── README.md                       # this file
-
 ```
 
 ---
@@ -254,24 +245,21 @@ openagent-frontend/
 ### 1. Clone the repo
 
 ```bash
-git clone [https://github.com/william-mckeon/openagent-frontend.git](https://github.com/william-mckeon/openagent-frontend.git)
+git clone https://github.com/william-mckeon/openagent-frontend.git
 cd openagent-frontend
-
 ```
 
 ### 2. Create your `.env` file
 
 ```bash
 cp .env.example .env
-
 ```
 
 Open `.env` and set the two required values:
 
 ```env
-OPENAGENT_API_URL=[http://host.docker.internal:8001](http://host.docker.internal:8001)
+OPENAGENT_API_URL=http://host.docker.internal:8001
 OPENAGENT_API_KEY=your_openagent_api_key_here
-
 ```
 
 **`OPENAGENT_API_KEY` MUST match the `OPENAGENT_API_KEY` value in `openagent-api`'s `.env` exactly.** A mismatch produces `HTTP 401` on every `/chat` and `/health` call and surfaces in the UI as a 🔐 banner.
@@ -287,9 +275,8 @@ Start `openagent-api` per its own README, then verify:
 ```bash
 curl -H "X-API-Key: your_openagent_api_key_here" http://localhost:8001/health
 # {"status":"ok",...}           ← upstream warm, ready
-# {"status":"loading",...}      ← Compute worker spinning up
+# {"status":"loading",...}      ← compute worker spinning up
 # {"status":"unreachable",...}  ← openagent-api can't reach openagent-infra
-
 ```
 
 Note: `/health` is authenticated. Without the `X-API-Key` header you'll get a 401 even from a fully-running gateway.
@@ -298,7 +285,6 @@ Note: `/health` is authenticated. Without the `X-API-Key` header you'll get a 40
 
 ```bash
 docker-compose up -d --build
-
 ```
 
 The `--build` flag is **required** any time `app.py`, `sse_decoder.py`, or the Dockerfile changes. Without it Docker reuses the cached image.
@@ -309,13 +295,12 @@ First build takes 1–2 minutes (pip install layer). Subsequent builds are sub-s
 
 ```text
 http://localhost:8000
-
 ```
 
 On first load you will see one of four states:
 
 * **🟢 "openagent-api ready — starting chat"** — upstream is warm, chat input is live
-* **⏳ "The upstream model is starting up"** — Cold start; the page polls every 3 seconds and unlocks automatically when ready
+* **⏳ "The upstream model is starting up"** — cold start; the page polls every 3 seconds and unlocks automatically when ready
 * **🔌 "openagent-api is up but cannot reach the upstream model"** — gateway is fine, openagent-infra or compute provider is down
 * **🔌 "Cannot reach openagent-api at …"** — gateway unreachable; fix `OPENAGENT_API_URL` in `.env` and retry
 
@@ -323,7 +308,6 @@ On first load you will see one of four states:
 
 ```bash
 docker-compose logs -f openagent-frontend
-
 ```
 
 Logs use the same format as `openagent-api` and `openagent-infra` so lines align when tailing all three services simultaneously. The frontend's named logger is `openagent.frontend`, with a child `openagent.frontend.sse_decoder` for the decoder module.
@@ -338,9 +322,9 @@ The persona is owned by `openagent-api` — the frontend has no copy, no path, a
 
 This means:
 
-* A future mobile app or CLI client gets the same agent identity by talking to `openagent-api` — no need to re-implement persona ownership in every client
+* Any client — a mobile app, a CLI — gets the same agent identity by talking to `openagent-api`, with no need to re-implement persona ownership
 * A tampered or out-of-date frontend cannot override the persona
-* The frontend stops carrying configuration IP that has no business at the UI layer
+* The frontend stays out of the business of holding configuration that has no place at the UI layer
 
 ### Conversation history (client-side)
 
@@ -356,13 +340,11 @@ To prevent users from firing messages that would just 503, `openagent-frontend` 
 
 1. On every Streamlit rerun, if `session_state.model_ready` is `False`, a `while` loop polls `/health` every 3 seconds with the `X-API-Key` header.
 2. A live status banner updates based on the response's top-level `status` field:
-* `ok` → flip `model_ready`, show 🟢 briefly, `st.rerun()` to load the chat UI
-* `loading` → show ⏳ with cold-start narrative and attempt counter
-* `unreachable` → show 🔌 with "openagent-api is up but cannot reach the upstream model"
-* Connection error → show 🔌 with the URL and retry info
-* Anything else → show ⚠️ with the raw status
-
-
+   * `ok` → flip `model_ready`, show 🟢 briefly, `st.rerun()` to load the chat UI
+   * `loading` → show ⏳ with cold-start narrative and attempt counter
+   * `unreachable` → show 🔌 with "openagent-api is up but cannot reach the upstream model"
+   * Connection error → show 🔌 with the URL and retry info
+   * Anything else → show ⚠️ with the raw status
 3. The chat UI is literally not rendered until the gate passes.
 
 The frontend doesn't need to know about the compute provider or openagent-infra; `openagent-api` translates upstream vocabulary into a tidy three-value response.
@@ -386,7 +368,7 @@ The decoding lives in `src/frontend/sse_decoder.py`:
 
 ### Error handling
 
-The frontend exposes a consistent error taxonomy with emoji prefixes so operators can scan logs and banners at a glance.
+The frontend exposes a consistent error taxonomy with emoji prefixes so I can scan logs and banners at a glance.
 
 | Prefix | Class | Trigger |
 | --- | --- | --- |
@@ -438,7 +420,6 @@ Each pair of services has its own shared secret. No key is forwarded unchanged t
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))"
-
 ```
 
 Paste the output into **both** `openagent-api/.env` (as `OPENAGENT_API_KEY=…`) **and** `openagent-frontend/.env` (as `OPENAGENT_API_KEY=…`). The two must match byte-for-byte.
@@ -468,7 +449,6 @@ streamlit run src/frontend/app.py \
   --server.address 0.0.0.0 \
   --server.headless true \
   --server.fileWatcherType none
-
 ```
 
 Streamlit supports hot-reload — edit `app.py` or `sse_decoder.py` and the browser refreshes automatically.
@@ -499,9 +479,9 @@ Because `openagent-api` owns the upstream relationship. Re-classifying errors at
 
 One source of truth. `openagent-infra` holds the default; `openagent-api` passes through; the frontend either sets a value or omits the field. Adding a frontend-side default would create two places to check when debugging.
 
-### Why the house error-prefix scheme (🔌 ⏳ 🔐 ⚠️ ❌)?
+### Why the emoji error-prefix scheme (🔌 ⏳ 🔐 ⚠️ ❌)?
 
-Consistency. Operators who have learned one codebase's error semantics should be able to read any log without a legend. The prefixes are also greppable.
+Consistency. Once you've learned the error semantics in one part of the stack, you can read any log without a legend, and the prefixes are greppable.
 
 ### Why port 8501 internal and 8000 external?
 
@@ -510,6 +490,32 @@ Consistency. Operators who have learned one codebase's error semantics should be
 ### Why Python 3.11 slim?
 
 Matches `openagent-api`'s base image for consistency across the stack. Slim variant keeps the image around 450 MB total. No CUDA, no BLAS, no compilers needed — this is a pure-Python HTTP client.
+
+---
+
+## Known Limitations
+
+These are present-tense limitations I'm aware of and have chosen to live with for now.
+
+### No per-user identity
+
+`OPENAGENT_API_KEY` is a single shared secret, not a per-user credential. There is no concept of "user A vs user B" at this layer — anyone holding the key gets full access to whatever the frontend can do. Fine for trusted, single-operator use; not appropriate for public exposure without an auth layer in front.
+
+### No rate limiting or abuse protection
+
+The frontend trusts its users. If it were exposed to a wider audience, rate limiting would belong at `openagent-api` or at a reverse proxy in front of it — not at the UI layer.
+
+### Single-user, single-browser session
+
+Conversation state lives in `st.session_state`, which is per browser tab. There is no cross-session persistence; closing the tab loses the history.
+
+### No context-window truncation
+
+The frontend forwards whatever message list it has accumulated. A long enough conversation will eventually exceed the upstream model's context window and the request will fail upstream. There is no client-side summarisation or trimming.
+
+### Cold-start UX is a blocking wait
+
+During the initial serverless worker spin-up, users see a live status banner but cannot do anything else. Acceptable for a personal tool; a "come back later" UX would be more appropriate for a public-facing deployment. Nothing the frontend does can speed up the worker spin-up — the wait is at the inference layer.
 
 ---
 
@@ -557,9 +563,8 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-```
+```text
 http://www.apache.org/licenses/LICENSE-2.0
-
 ```
 
 Unless required by applicable law or agreed to in writing, software
@@ -573,4 +578,3 @@ limitations under the License.
 ## Maintainer
 
 **William McKeon** ([github.com/william-mckeon](https://github.com/william-mckeon))
-
