@@ -1,0 +1,39 @@
+# =============================================================================
+# openagent-frontend - Python dependencies
+# =============================================================================
+#
+# openagent-frontend is a pure UI shell. It renders a Streamlit chat page and
+# relays the conversation to openagent-api over HTTP — no persona, no auth
+# chain, no inference, no database. The dependency footprint reflects that:
+# three top-level packages and nothing from the backend stack.
+#
+# Specifically NOT here, and intentionally so:
+#   - fastapi, uvicorn              (this is a client, not a server)
+#   - httpx                         (requests is sufficient for Streamlit's
+#                                    synchronous run model; the SSE stream is
+#                                    consumed with requests' iter_lines)
+#   - torch, transformers, etc.     (no inference — that lives at the BYOC
+#                                    provider behind openagent-infra)
+#   - sqlalchemy, psycopg2          (stateless; no DB at this layer)
+#
+# VERSION PINNING:
+#   Compatible-release pins (>=A,<B) allow patch and approved minor updates
+#   within a known-safe band, matching the other OpenAgent services. When the
+#   system grows, switch to a lockfile (pip-tools or uv) for reproducible
+#   builds.
+# =============================================================================
+
+# Streamlit: the chat UI. Renders the page, the message history, the chat
+# input, and the health-gate spinner in src/frontend/app.py.
+streamlit>=1.40.0,<2.0.0
+
+# requests: synchronous HTTP client used by app.py to call openagent-api's
+# /chat (streamed via iter_lines) and /health. Sync fits Streamlit's
+# top-to-bottom run model; no async client is needed at this layer.
+requests>=2.31.0,<3.0.0
+
+# python-dotenv: loads .env at startup so os.environ.get() in app.py sees the
+# operator's values (OPENAGENT_API_URL, OPENAGENT_API_KEY) without exporting
+# them in the host shell. Same approach used by openagent-api and
+# openagent-infra. 1.0+ for the current API.
+python-dotenv>=1.0.0,<2.0.0
