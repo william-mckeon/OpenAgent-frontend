@@ -1,0 +1,254 @@
+# ============================================================================
+# openagent-frontend - Docker Compose
+# Maintainer: William McKeon
+# ============================================================================
+#
+# ROLE:
+#   Defines the single openagent-frontend service. This is the ONLY service in
+#   this compose file — openagent-api, openagent-infra, and the compute
+#   provider all run in their own separate repos / stacks / clouds, and are
+#   reached over HTTP at runtime. The frontend talks to ONE upstream service:
+#   openagent-api. openagent-api in turn brokers to openagent-infra and the
+#   provider.
+#
+# ARCHITECTURE:
+#
+#   ┌────────────────────────────────────────────────────────────┐
+#   │                     Browser (host)                         │
+#   │                  http://localhost:8000                     │
+#   └─────────────────────────┬──────────────────────────────────┘
+#                             │
+#                             │ Host port 8000 → container port 8501
+#                             ▼
+#   ┌────────────────────────────────────────────────────────────┐
+#   │  openagent-frontend  (THIS COMPOSE FILE)                   │
+#   │  Streamlit on :8501 inside container                       │
+#   │  Ships : src/frontend/app.py + src/frontend/sse_decoder.py │
+#   │  Env   : OPENAGENT_API_URL, OPENAGENT_API_KEY (from .env)  │
+#   └─────────────────────────┬──────────────────────────────────┘
+#                             │
+#                             │ HTTP + SSE, X-API-Key: OPENAGENT_API_KEY
+#                             │ Target URL = OPENAGENT_API_URL from .env
+#                             ▼
+#   ┌────────────────────────────────────────────────────────────┐
+#   │  openagent-api     (SEPARATE REPO, SEPARATE COMPOSE STACK) │
+#   │  FastAPI gateway on :8001                                  │
+#   │  Owns : persona (bio.txt), auth chain, SSE relay           │
+#   │  Not defined in this file. Run it independently.           │
+#   └─────────────────────────┬──────────────────────────────────┘
+#                             │
+#                             │ HTTP + SSE, X-API-Key: INFRA_API_KEY
+#                             │ Target URL = OPENAGENT_INFRA_URL (in openagent-api/.env)
+#                             ▼
+#   ┌────────────────────────────────────────────────────────────┐
+#   │  openagent-infra   (SEPARATE REPO, SEPARATE COMPOSE STACK) │
+#   │  FastAPI proxy on :8002 → BYOC provider                    │
+#   │  Not defined in this file. Run it independently.           │
+#   └─────────────────────────┬──────────────────────────────────┘
+#                             │
+#                             │ HTTPS, Authorization: Bearer PROVIDER_API_KEY
+#                             ▼
+#   ┌────────────────────────────────────────────────────────────┐
+#   │  BYOC compute provider                                     │
+#   │  base reasoning model                                      │
+#   └────────────────────────────────────────────────────────────┘
+#
+# REACHING openagent-api FROM THIS CONTAINER:
+#   Two supported paths, depending on where openagent-api is running:
+#
+#   PATH A — openagent-api running on the DOCKER HOST (simplest):
+#     In .env set:
+#       OPENAGENT_API_URL=http://host.docker.internal:8001
+#
+#     The extra_hosts entry below makes host.docker.internal resolve to the
+#     host gateway on ALL platforms (Docker Desktop Mac/Windows already handle
+#     it natively, but Linux needs this hint). This is the recommended setup
+#     for local development.
+#
+#   PATH B — openagent-api running in ANOTHER COMPOSE STACK on a SHARED DOCKER
+#            NETWORK (recommended for production):
+#     1. In openagent-api's compose, attach its service to a named external
+#        network (e.g. "openagent-network"):
+#          networks:
+#            openagent-network:
+#              external: true
+#              name: openagent-network
+#     2. Uncomment the `networks:` sections below in this file.
+#     3. In .env set:
+#          OPENAGENT_API_URL=http://openagent-api:8001
+#        (Docker DNS resolves the service name on the shared network.)
+#     4. Ensure the network exists before bringing up either stack:
+#          docker network create openagent-network
+#
+# ENVIRONMENT:
+#   All runtime configuration is loaded from .env at the repository root via
+#   `env_file:` below. See .env.example for the full list. The two required
+#   variables are:
+#     OPENAGENT_API_URL   — base URL of the openagent-api gateway
+#     OPENAGENT_API_KEY   — X-API-Key shared secret (frontend ↔ openagent-api)
+#
+#   OPENAGENT_API_KEY is the FRONTEND ↔ OPENAGENT-API boundary key. It is NOT
+#   the same as INFRA_API_KEY (which lives in openagent-api/.env and
+#   authenticates openagent-api to openagent-infra) or PROVIDER_API_KEY (which
+#   lives in openagent-infra/.env and authenticates openagent-infra to the
+#   compute provider). This is defense in depth — three independent secrets at
+#   three independent boundaries. See openagent-api's security model docs for
+#   the full compartmentalization rationale.
+#
+# NO version: FIELD:
+#   Docker Compose v2 (2023+) treats top-level `version:` as obsolete and
+#   emits a deprecation warning on every `docker-compose up`. It is
+#   intentionally omitted here. If you see a warning about it from any tool,
+#   update to Compose v2 — do not add version back.
+#
+# COMMON COMMANDS:
+#   Build and start (detached):
+#     docker-compose up -d --build
+#
+#   View logs (live, follow):
+#     docker-compose logs -f openagent-frontend
+#
+#   Rebuild from scratch after .env or Dockerfile changes:
+#     docker-compose down && docker-compose up -d --build
+#
+#   Stop and remove:
+#     docker-compose down
+#
+#   Status:
+#     docker-compose ps
+#
+# OPTIONAL ADDITIONS (not enabled by default, keeping this lean):
+#   - healthcheck: to mark container healthy via /_stcore/health
+#   - deploy.resources.limits: CPU / memory caps for production
+#   - logging.driver: for custom log routing (json-file, syslog, etc.)
+# ============================================================================
+
+
+# ----------------------------------------------------------------------------
+# PROJECT NAME
+# ----------------------------------------------------------------------------
+# Overrides the default compose project name (which would be derived from the
+# directory name). Makes `docker-compose ps` and the container prefix
+# predictable regardless of where this repo is cloned.
+name: openagent-frontend
+
+
+# ----------------------------------------------------------------------------
+# SERVICES
+# ----------------------------------------------------------------------------
+services:
+
+  openagent-frontend:
+    # ------------------------------------------------------------------
+    # BUILD
+    # ------------------------------------------------------------------
+    # Build context is the repository root so the Dockerfile's
+    # `COPY requirements.txt .` and `COPY src/frontend/ ...` instructions can
+    # see all needed paths. The Dockerfile itself lives at
+    # docker/frontend/Dockerfile.
+    #
+    # There is no `COPY src/prompt/ ...` instruction — bio.txt is owned by
+    # openagent-api and is not part of this image. See
+    # docker/frontend/Dockerfile for the COPY list.
+    build:
+      context: .
+      dockerfile: docker/frontend/Dockerfile
+
+    # ------------------------------------------------------------------
+    # IMAGE NAME
+    # ------------------------------------------------------------------
+    # Tag so the locally-built image has a stable, findable name for
+    # `docker images` and for future push to a registry. Matches the
+    # `LABEL version="1.0.0"` baked into the Dockerfile.
+    image: openagent-frontend:1.0.0
+
+    # ------------------------------------------------------------------
+    # CONTAINER NAME
+    # ------------------------------------------------------------------
+    # Explicit name so logs and exec commands don't depend on the
+    # auto-generated <project>-<service>-1 format:
+    #   docker logs openagent-frontend
+    #   docker exec -it openagent-frontend sh
+    container_name: openagent-frontend
+
+    # ------------------------------------------------------------------
+    # PORT MAPPING
+    # ------------------------------------------------------------------
+    # Format: "HOST:CONTAINER"
+    #   HOST      = 8000  — what users open in the browser
+    #   CONTAINER = 8501  — Streamlit default, matches EXPOSE in
+    #                       docker/frontend/Dockerfile and the
+    #                       --server.port flag in its ENTRYPOINT
+    #
+    # This satisfies the OpenAgent port topology:
+    #   User → openagent-frontend (:8000) → openagent-api (:8001) → openagent-infra (:8002) → BYOC provider
+    ports:
+      - "8000:8501"
+
+    # ------------------------------------------------------------------
+    # ENVIRONMENT
+    # ------------------------------------------------------------------
+    # Load all configuration from .env at the repo root. See .env.example for
+    # the canonical list of variables. The frontend specifically requires:
+    #   OPENAGENT_API_URL   — gateway URL (e.g. http://host.docker.internal:8001)
+    #   OPENAGENT_API_KEY   — X-API-Key shared secret with openagent-api
+    #
+    # app.py reads these via os.getenv() with safe fallbacks, so a missing
+    # .env will not crash the container — but /chat will 401 or
+    # ConnectionError until the real values are supplied.
+    env_file:
+      - .env
+
+    # ------------------------------------------------------------------
+    # EXTRA HOSTS
+    # ------------------------------------------------------------------
+    # Makes the special hostname "host.docker.internal" resolve to the Docker
+    # host gateway on all platforms — including Linux, where it would
+    # otherwise be undefined. Docker Desktop on macOS and Windows provides
+    # this by default; this entry makes behaviour consistent.
+    #
+    # This is the escape hatch that lets the frontend container reach an
+    # openagent-api running directly on the host (as opposed to in another
+    # container) — the common local-dev setup.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # ------------------------------------------------------------------
+    # RESTART POLICY
+    # ------------------------------------------------------------------
+    # Restart automatically if the container exits unexpectedly (crash, OOM
+    # kill, etc.) but do NOT restart if an operator explicitly runs
+    # `docker-compose stop` or `docker stop`. This is the sane default for a
+    # long-running UI service.
+    restart: unless-stopped
+
+    # ------------------------------------------------------------------
+    # NETWORKS (optional, commented out)
+    # ------------------------------------------------------------------
+    # Uncomment to attach this service to a shared external network so it can
+    # reach openagent-api by service name instead of via
+    # host.docker.internal. See the README section at the top of this file
+    # for the full recipe. When using this path, set in .env:
+    #   OPENAGENT_API_URL=http://openagent-api:8001
+    #
+    # networks:
+    #   - openagent-network
+
+
+# ----------------------------------------------------------------------------
+# NETWORKS (optional, commented out)
+# ----------------------------------------------------------------------------
+# Uncomment to declare the shared external network that openagent-api and
+# openagent-frontend both attach to. The network must be created out of band
+# first:
+#     docker network create openagent-network
+#
+# networks:
+#   openagent-network:
+#     external: true
+#     name: openagent-network
+
+
+# ============================================================================
+# END OF DOCKER-COMPOSE
+# ============================================================================

@@ -1,0 +1,186 @@
+# ============================================================================
+# openagent-frontend - Docker Ignore (.dockerignore)
+# ============================================================================
+#
+# ROLE:
+#   Tells `docker build` which files to exclude from the build context sent
+#   to the Docker daemon. Serves three purposes:
+#
+#     1. SECURITY — Keeps .env (live API keys) out of the final image.
+#        Without this rule, anyone who pulls the image can extract the secret
+#        with `docker cp` or `docker inspect`.
+#
+#     2. SPEED — Skips heavy, irrelevant directories (.git, .venv,
+#        __pycache__, etc.) so `docker build` transfers a smaller context to
+#        the daemon and rebuilds faster on each iteration.
+#
+#     3. CORRECTNESS — Prevents host-side virtualenvs or editor caches from
+#        shadowing the container's own environment at runtime.
+#
+# READ ORDER:
+#   Docker applies these patterns against the build context root, which is the
+#   directory passed as the final argument to `docker build`. For
+#   openagent-frontend that is typically the repository root:
+#     docker build -f docker/frontend/Dockerfile -t openagent-frontend .
+#
+# PATTERN NOTES:
+#   - Lines starting with `#` are comments.
+#   - Patterns are relative to the build context.
+#   - `**/` matches any directory depth.
+#   - A leading `!` un-ignores a pattern previously matched.
+# ============================================================================
+
+
+# ----------------------------------------------------------------------------
+# SECRETS — CRITICAL
+# ----------------------------------------------------------------------------
+# .env contains OPENAGENT_API_KEY and OPENAGENT_API_URL. Secrets are injected
+# at runtime via docker-compose env_file, NOT baked into the image. The
+# template .env.example is safe and IS included in the build context for
+# operator reference.
+.env
+.env.*
+!.env.example
+
+
+# ----------------------------------------------------------------------------
+# VERSION CONTROL
+# ----------------------------------------------------------------------------
+# .git is often hundreds of MB and adds nothing to a runtime image.
+.git/
+.gitignore
+.gitattributes
+.github/
+
+
+# ----------------------------------------------------------------------------
+# PYTHON — BYTECODE AND CACHES
+# ----------------------------------------------------------------------------
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+
+# ----------------------------------------------------------------------------
+# PYTHON — VIRTUAL ENVIRONMENTS
+# ----------------------------------------------------------------------------
+# Host-side venvs must never leak into the container — they contain
+# host-compiled binaries that will fail to run inside the Linux image.
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+
+# ----------------------------------------------------------------------------
+# PYTHON — BUILD AND DISTRIBUTION
+# ----------------------------------------------------------------------------
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+
+# ----------------------------------------------------------------------------
+# PYTHON — TEST AND LINT CACHES
+# ----------------------------------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+
+
+# ----------------------------------------------------------------------------
+# STREAMLIT — RUNTIME CACHES
+# ----------------------------------------------------------------------------
+# Streamlit writes a per-user cache and config directory at runtime. These
+# belong to the host operator, never to the shipped image.
+.streamlit/
+**/.streamlit/
+
+
+# ----------------------------------------------------------------------------
+# IDE / EDITOR
+# ----------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*~
+.project
+.pydevproject
+.settings/
+
+
+# ----------------------------------------------------------------------------
+# OS METADATA
+# ----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+
+# ----------------------------------------------------------------------------
+# LOGS AND TEMP FILES
+# ----------------------------------------------------------------------------
+*.log
+logs/
+*.tmp
+*.bak
+*.orig
+*.rej
+
+
+# ----------------------------------------------------------------------------
+# DOCKER META
+# ----------------------------------------------------------------------------
+# The Dockerfile itself is not needed inside the image it builds.
+# docker-compose.yml is a host-side orchestration file and should not be
+# present inside runtime containers.
+Dockerfile
+docker-compose.yml
+docker-compose.*.yml
+.dockerignore
+
+
+# ----------------------------------------------------------------------------
+# DOCUMENTATION
+# ----------------------------------------------------------------------------
+# Docs are for humans reading the repo, not for the runtime image. Excluding
+# them keeps the image slimmer. README is optional — keep it commented out if
+# you want `docker run` help text to reference it.
+# README.md
+docs/
+*.md
+!src/**/*.md
+
+
+# ============================================================================
+# END OF DOCKERIGNORE
+# ============================================================================

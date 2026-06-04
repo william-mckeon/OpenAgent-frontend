@@ -1,0 +1,189 @@
+# ============================================================================
+# openagent-frontend - Git Ignore (.gitignore)
+# ============================================================================
+#
+# ROLE:
+#   Tells git which paths to exclude from version control. Serves two
+#   purposes:
+#
+#     1. SECURITY — Keeps secrets (.env, API keys, credentials) out of commits
+#        and out of the remote repository. Once a secret is pushed to GitHub
+#        it must be treated as compromised even after deletion — rotate
+#        immediately.
+#
+#     2. CLEANLINESS — Excludes local build artefacts, editor caches,
+#        virtualenvs, and OS metadata so the repo only tracks source files
+#        that matter.
+#
+# SANITY CHECK:
+#   Before committing anything sensitive, run:
+#     git check-ignore -v <path>
+#   If the file should be ignored and this command prints nothing, something
+#   is wrong — stop and fix the .gitignore before pushing.
+# ============================================================================
+
+
+# ----------------------------------------------------------------------------
+# SECRETS — CRITICAL
+# ----------------------------------------------------------------------------
+# NEVER commit .env files. They contain OPENAGENT_API_KEY which is the shared
+# secret validated by openagent-api. Committing it to a public or shared repo
+# immediately compromises the key.
+#
+# The template .env.example IS tracked — it contains placeholders only.
+.env
+.env.*
+!.env.example
+
+# Common alternative secret locations
+secrets/
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+
+# ----------------------------------------------------------------------------
+# PYTHON — BYTECODE AND CACHES
+# ----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+
+# ----------------------------------------------------------------------------
+# PYTHON — VIRTUAL ENVIRONMENTS
+# ----------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+
+# ----------------------------------------------------------------------------
+# PYTHON — BUILD AND DISTRIBUTION
+# ----------------------------------------------------------------------------
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+
+# ----------------------------------------------------------------------------
+# PYTHON — TEST AND LINT CACHES
+# ----------------------------------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+
+# ----------------------------------------------------------------------------
+# STREAMLIT — RUNTIME CACHES
+# ----------------------------------------------------------------------------
+# Streamlit writes runtime caches and per-user config files that should never
+# be committed.
+.streamlit/
+**/.streamlit/
+
+
+# ----------------------------------------------------------------------------
+# JUPYTER — NOTEBOOK CHECKPOINTS
+# ----------------------------------------------------------------------------
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+
+# ----------------------------------------------------------------------------
+# IDE / EDITOR
+# ----------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+
+# ----------------------------------------------------------------------------
+# OS METADATA
+# ----------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+
+# ----------------------------------------------------------------------------
+# LOGS AND TEMP FILES
+# ----------------------------------------------------------------------------
+*.log
+logs/
+*.tmp
+*.bak
+*.orig
+*.rej
+
+
+# ----------------------------------------------------------------------------
+# DOCKER — LOCAL STATE
+# ----------------------------------------------------------------------------
+# Compose overrides are often developer-specific; the canonical
+# docker-compose.yml IS tracked but local overrides are not.
+docker-compose.override.yml
+docker-compose.local.yml
+.docker/
+
+
+# ----------------------------------------------------------------------------
+# NODE — JUST IN CASE
+# ----------------------------------------------------------------------------
+# Not currently used by openagent-frontend but listed defensively in case any
+# future tooling (e.g. a landing page, Storybook, etc.) is added.
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+
+
+# ============================================================================
+# END OF GITIGNORE
+# ============================================================================
