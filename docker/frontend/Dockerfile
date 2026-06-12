@@ -218,6 +218,24 @@ COPY src/frontend/ ./src/frontend/
 EXPOSE 8501
 
 # ----------------------------------------------------------------------------
+# NON-ROOT USER
+# ----------------------------------------------------------------------------
+# Drop root before launching. Running the container as a dedicated unprivileged
+# user limits the blast radius if the Streamlit process is ever compromised —
+# it cannot write outside its own files or escalate inside the container. The
+# image needs no root capabilities at runtime: it only binds an unprivileged
+# port (8501) and reads its own source tree.
+#
+# Create a system user/group with a fixed UID/GID (10001) for predictability
+# across rebuilds, hand ownership of the app tree to it, then switch to it. All
+# instructions AFTER this line (only the ENTRYPOINT) run as appuser.
+RUN groupadd --system --gid 10001 appuser && \
+    useradd --system --uid 10001 --gid 10001 --home-dir /app appuser && \
+    chown -R appuser:appuser /app
+
+USER appuser
+
+# ----------------------------------------------------------------------------
 # ENTRYPOINT
 # ----------------------------------------------------------------------------
 # Launch Streamlit.

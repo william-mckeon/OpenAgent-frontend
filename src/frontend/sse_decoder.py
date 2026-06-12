@@ -89,6 +89,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Optional
 
@@ -120,6 +121,10 @@ logger = logging.getLogger("openagent.frontend.sse_decoder")
 # openagent-infra.
 
 SSE_DATA_PREFIX = "data: "
+# The SSE spec also permits "data:" with NO trailing space. Gate on this
+# shorter prefix and strip an optional single following space afterwards so
+# both "data: {...}" and "data:{...}" / "data:[DONE]" are handled.
+SSE_DATA_PREFIX_NOSPACE = "data:"
 SSE_COMMENT_PREFIX = ":"
 
 # ============================================================================
@@ -142,6 +147,20 @@ DONE_SENTINEL = "[DONE]"
 #   data: [ERROR upstream_status=503]\n\n
 # Always followed by a [DONE] sentinel so consumers can clean up.
 ERROR_SENTINEL_PREFIX = "[ERROR"
+
+# The raw [ERROR ...] payload is upstream-controlled text. Rendering it
+# verbatim into the UI is a social-engineering / injection vector (a
+# compromised or prompt-injected upstream could embed phishing copy or markup).
+# So instead of forwarding the payload, we parse it into a known shape: pull out
+# any "upstream_status=NNN" token and otherwise keep only a length-capped,
+# whitespace-normalised fallback. The consumer (app.py) maps the status to a
+# fixed, trusted message string.
+ERROR_STATUS_RE = re.compile(r"upstream_status\s*=\s*(\d{3})")
+
+# Hard cap on the length of the raw fallback string carried out of the decoder,
+# so even the "unknown shape" path cannot smuggle a wall of attacker text into
+# the error banner.
+ERROR_RAW_MAX_LEN = 120
 
 # ============================================================================
 # EVENT KIND CONSTANTS
@@ -185,8 +204,15 @@ class SSEEvent:
                         See the KIND_* constants at module level.
         text:           Token text. Populated for "reasoning" and "content".
                         Empty string for other kinds.
-        error:          Upstream error message. Populated for "error" only.
-                        Empty string for other kinds.
+        error:          A length-capped, whitespace-normalised fallback
+                        description of an upstream error. Populated for "error"
+                        only. NOT the raw upstream payload — see parse_chunk /
+                        parse_error_sentinel. Empty string for other kinds.
+        error_status:   Parsed upstream HTTP status (e.g. 503) extracted from an
+                        [ERROR upstream_status=NNN] sentinel, or None if the
+                        sentinel carried no recognisable status. Populated for
+                        "error" only; lets the consumer render a fixed, trusted,
+                        status-keyed message instead of echoing upstream text.
         finish_reason:  Completion reason from the upstream model. Populated
                         for "finish" only. Empty string for other kinds.
                         Typical value is "stop" (model emitted EOS) but may
@@ -198,6 +224,37 @@ class SSEEvent:
     text: str = ""
     error: str = ""
     finish_reason: str = ""
+    error_status: Optional[int] = None
+
+
+# ============================================================================
+# ERROR SENTINEL PARSING — INTERNAL HELPER
+# ============================================================================
+
+def parse_error_sentinel(payload: str) -> SSEEvent:
+    """
+    Parse a raw [ERROR ...] sentinel payload into a structured error SSEEvent.
+
+    The raw payload is upstream-controlled and must NEVER be forwarded to the
+    UI verbatim (injection / social-engineering vector). This function extracts
+    the one trustworthy signal — the upstream HTTP status, if present — and
+    otherwise carries only a length-capped, whitespace-normalised fallback. The
+    consumer (app.py) maps error_status to a fixed, trusted message and only
+    falls back to the short string when no status was parsed.
+
+    Args:
+        payload: The sentinel payload, e.g. "[ERROR upstream_status=503]".
+
+    Returns:
+        SSEEvent(kind="error", error=<capped fallback>, error_status=<int|None>).
+    """
+    match = ERROR_STATUS_RE.search(payload)
+    status: Optional[int] = int(match.group(1)) if match else None
+
+    # Capped, single-line fallback. Never the raw multi-line payload.
+    fallback = " ".join(payload.split())[:ERROR_RAW_MAX_LEN]
+
+    return SSEEvent(kind=KIND_ERROR, error=fallback, error_status=status)
 
 
 # ============================================================================
@@ -232,11 +289,11 @@ def parse_chunk(line: str) -> Optional[SSEEvent]:
         None if the line was a separator, comment, or malformed payload.
 
     Notes:
-        - The "data: " prefix is exactly six characters (d, a, t, a, colon,
-          space). The SSE spec allows "data:" without the trailing space,
-          but openagent-api / openagent-infra / the provider all emit the
-          trailing space consistently. Defensive coding here strips a
-          leading space if present, then strips trailing whitespace.
+        - The gate accepts the spec-legal "data:" prefix with OR without the
+          trailing space. openagent-api / openagent-infra / the provider emit
+          the trailing space consistently, but a spec-legal "data:{...}" is
+          also handled: strip the prefix, then strip a single optional
+          following space, then strip remaining trailing whitespace.
         - Two non-JSON sentinels are checked BEFORE attempting json.loads()
           to avoid generating a WARNING log on every legitimate end-of-
           stream and every legitimate in-band error.
@@ -252,11 +309,18 @@ def parse_chunk(line: str) -> Optional[SSEEvent]:
     # Skip lines without the data: prefix. The SSE spec defines other
     # field prefixes (event:, id:, retry:) but openagent-api does not emit
     # them. If one appears, it's safer to skip than to misinterpret it.
-    if not line.startswith(SSE_DATA_PREFIX):
+    #
+    # Gate on the spec-legal "data:" (no required trailing space) so both
+    # "data: {...}" and "data:{...}" / "data:[DONE]" are accepted. Strip the
+    # prefix, then strip a single optional following space, then strip any
+    # remaining leading/trailing whitespace.
+    if not line.startswith(SSE_DATA_PREFIX_NOSPACE):
         return None
 
-    # Strip the "data: " prefix and any leading/trailing whitespace.
-    payload = line[len(SSE_DATA_PREFIX):].strip()
+    payload = line[len(SSE_DATA_PREFIX_NOSPACE):]
+    if payload.startswith(" "):
+        payload = payload[1:]
+    payload = payload.strip()
 
     # An empty payload after the prefix is meaningless — skip it.
     if not payload:
@@ -276,11 +340,13 @@ def parse_chunk(line: str) -> Optional[SSEEvent]:
     # ------------------------------------------------------------------
     # openagent-api emits this when the upstream connection fails after SSE
     # headers have already gone out. Format:  [ERROR upstream_status=503]
-    # The full payload (including the brackets) is preserved as the error
-    # field so app.py can display it verbatim or parse it further.
+    # The raw payload is upstream-controlled, so we do NOT forward it verbatim
+    # (injection / social-engineering vector). parse_error_sentinel() reduces it
+    # to a parsed status + length-capped fallback; app.py renders a fixed,
+    # status-keyed message.
     if payload.startswith(ERROR_SENTINEL_PREFIX):
-        logger.error(f"In-band SSE error received: {payload}")
-        return SSEEvent(kind=KIND_ERROR, error=payload)
+        logger.error(f"In-band SSE error received: {payload[:ERROR_RAW_MAX_LEN]!r}")
+        return parse_error_sentinel(payload)
 
     # ------------------------------------------------------------------
     # JSON CHUNK — OpenAI ChatCompletion streaming format
@@ -332,13 +398,33 @@ def parse_chunk(line: str) -> Optional[SSEEvent]:
     # finish_reason. Yielding KIND_FINISH lets the consumer record the
     # reason without needing to peek at every chunk's finish_reason.
 
+    # Guard token TYPE, not just emptiness. A non-string token (e.g. a number,
+    # list, or dict the provider emits under load) would pass an "!= ''" check
+    # and then crash the consumer's `answer_text += event.text` with a
+    # TypeError — turning one malformed chunk into a whole-stream error. Require
+    # a non-empty str and skip-with-warning otherwise, consistent with the
+    # other shape guards above.
     reasoning_token = delta.get("reasoning")
-    if reasoning_token is not None and reasoning_token != "":
-        return SSEEvent(kind=KIND_REASONING, text=reasoning_token)
+    if reasoning_token is not None:
+        if isinstance(reasoning_token, str) and reasoning_token:
+            return SSEEvent(kind=KIND_REASONING, text=reasoning_token)
+        if not isinstance(reasoning_token, str):
+            logger.warning(
+                f"Non-string delta.reasoning (skipping): "
+                f"type={type(reasoning_token).__name__} | "
+                f"payload preview: {payload[:120]!r}"
+            )
 
     content_token = delta.get("content")
-    if content_token is not None and content_token != "":
-        return SSEEvent(kind=KIND_CONTENT, text=content_token)
+    if content_token is not None:
+        if isinstance(content_token, str) and content_token:
+            return SSEEvent(kind=KIND_CONTENT, text=content_token)
+        if not isinstance(content_token, str):
+            logger.warning(
+                f"Non-string delta.content (skipping): "
+                f"type={type(content_token).__name__} | "
+                f"payload preview: {payload[:120]!r}"
+            )
 
     if finish_reason:
         return SSEEvent(kind=KIND_FINISH, finish_reason=str(finish_reason))
@@ -526,6 +612,7 @@ __all__ = [
     "SSEEvent",
     # Secondary helpers (exposed for testability and clarity)
     "parse_chunk",
+    "parse_error_sentinel",
     # Event kind constants
     "KIND_REASONING",
     "KIND_CONTENT",

