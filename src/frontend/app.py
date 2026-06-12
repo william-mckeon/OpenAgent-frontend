@@ -188,13 +188,27 @@ OPENAGENT_API_URL: str = os.getenv(
 
 OPENAGENT_API_KEY: str = os.getenv("OPENAGENT_API_KEY", "")
 
-# Connect timeout (seconds) for both /chat and /health. The chat READ timeout
-# is intentionally None — generation can legitimately take several minutes
-# (provider cold start, high reasoning effort 1-3 min) and we do not want
-# requests to time out mid-stream.
+# Connect timeout (seconds) for both /chat and /health.
 CONNECT_TIMEOUT_SECONDS: int = 10
 HEALTH_TIMEOUT_SECONDS: int = 5
 HEALTH_POLL_INTERVAL_SECONDS: int = 3
+
+# Read timeout (seconds) for the /chat stream — the gap BETWEEN bytes, not the
+# total duration. A long generation still streams reasoning/content tokens
+# every few seconds, so a generous gap tolerates legitimate work (provider
+# cold start, high reasoning effort) while bounding a half-open/stalled
+# connection that would otherwise hang Streamlit's single thread forever.
+# Override via env if a provider's cold start can exceed this between bytes.
+STREAM_READ_TIMEOUT_SECONDS: float = float(
+    os.getenv("OPENAGENT_STREAM_READ_TIMEOUT", "300")
+)
+
+# Bound the startup health gate so a down/misconfigured backend doesn't freeze
+# the UI indefinitely. After this many polls we stop looping and render a
+# manual Retry control instead. 0 or negative disables the cap (poll forever).
+MAX_HEALTH_POLL_ATTEMPTS: int = int(
+    os.getenv("OPENAGENT_MAX_HEALTH_POLL_ATTEMPTS", "40")
+)
 
 # ============================================================================
 # REASONING EFFORT TOGGLE
@@ -404,11 +418,12 @@ def stream_chat(
             headers=headers,
             json=payload,
             stream=True,
-            # (connect_timeout, read_timeout). read_timeout=None because
-            # generation can legitimately run for several minutes — provider
-            # cold start plus high-effort reasoning (1-3 min) means a finite
-            # timeout would cut off legitimate work.
-            timeout=(CONNECT_TIMEOUT_SECONDS, None),
+            # (connect_timeout, read_timeout). The read timeout is the gap
+            # allowed BETWEEN streamed bytes, not the total generation time —
+            # a long answer keeps emitting tokens, so a generous per-gap bound
+            # tolerates legitimate work while ensuring a stalled/half-open
+            # connection eventually errors instead of hanging this thread.
+            timeout=(CONNECT_TIMEOUT_SECONDS, STREAM_READ_TIMEOUT_SECONDS),
         )
     except requests.exceptions.ConnectionError as err:
         msg = (
@@ -538,6 +553,7 @@ st.divider()
 if not st.session_state.model_ready:
     status_box = st.empty()
     attempt = 0
+    capped = MAX_HEALTH_POLL_ATTEMPTS > 0
 
     while not st.session_state.model_ready:
         attempt += 1
@@ -578,6 +594,23 @@ if not st.session_state.model_ready:
                 f"⚠️ Unknown /health status: `{health_status}`. "
                 f"Retrying. (Attempt #{attempt})"
             )
+
+        # Stop looping once the attempt cap is hit. A blocking while-loop with
+        # no exit freezes Streamlit's single thread, so a down or misconfigured
+        # backend (including a wrong/empty API key) would otherwise lock the UI
+        # forever. Render a manual Retry control and halt instead — clicking it
+        # reruns the script and re-enters this gate fresh.
+        if capped and attempt >= MAX_HEALTH_POLL_ATTEMPTS:
+            elapsed = attempt * HEALTH_POLL_INTERVAL_SECONDS
+            status_box.error(
+                f"⛔ openagent-api did not become ready after {attempt} "
+                f"attempts (~{elapsed}s). Last status: "
+                f"`{health_status or 'unreachable'}`. Check that "
+                f"openagent-api and openagent-infra are running and that "
+                f"OPENAGENT_API_KEY matches between the services."
+            )
+            st.button("🔄 Retry connection")  # any click reruns the script
+            st.stop()
 
         time.sleep(HEALTH_POLL_INTERVAL_SECONDS)
 
